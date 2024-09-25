@@ -3,3 +3,4 @@ __pycache__/
 *.npy
 .vscode/
 .DS_Store
+*.pdf

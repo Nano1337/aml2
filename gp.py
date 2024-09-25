@@ -30,14 +30,14 @@ def grab_prng():
 Transform unconstrained hyperparameters to constrained (ensure strictly positive).
 '''
 def param_transform(unconstrained_hyperparams):
-    pass
+    return np.exp(unconstrained_hyperparams)
 #
 
 '''
 Transform constrained hyperparameters to unconstrained
 '''
 def inverse_param_transform(hyperparams):
-    pass
+    return np.log(hyperparams)
 #
 
 '''
@@ -45,7 +45,14 @@ Evaluate the squared-exponential kernel between all pairs of points from X1 and 
 NOTE: exclude adding the noise variance. This should be added to the covariance when considering just training data.
 '''
 def sqexp_cov_function(X1, X2, hyperparams):
-    pass
+    signal_var = hyperparams[1]
+    length_scale = hyperparams[2]
+
+    # Compute the squared exponential kernel
+    sq_dist = np.sum(X1**2, axis=1, keepdims=True) + np.sum(X2**2, axis=1, keepdims=True).T - 2 * X1 @ X2.T
+    cov = signal_var * np.exp(-0.5 * sq_dist / length_scale**2)
+    
+    return cov
 #
 
 '''
@@ -53,7 +60,18 @@ Evaluate the Mahalanobis-based squared-exponential kernel between all pairs of p
 NOTE: exclude adding the noise variance.
 '''
 def sqexp_mahalanobis_cov_function(X1, X2, hyperparams):
-    pass
+    signal_var = hyperparams[1]
+    length_scale = hyperparams[2]
+    # Element-wise inversion of length_scale
+    inv_length_scale = 1.0 / length_scale # Shape: (d,)
+    # Compute the scaled differences
+    diff = X1[:, np.newaxis, :] - X2[np.newaxis, :, :] # Shape: (n1, n2, d)
+    diff_scaled = diff * inv_length_scale # Broadcasting applies scaling per feature
+    # Compute the squared Mahalanobis distance
+    mahalanobis_dist = np.sum(diff_scaled ** 2, axis=-1) # Shape: (n1, n2)
+    # Compute the covariance matrix
+    cov = signal_var * np.exp(-0.5 * mahalanobis_dist)
+    return cov
 #
 
 '''
@@ -64,8 +82,20 @@ The covariance function, X_train and Y_train will be referenced from within the 
 '''
 def log_marginal_likelihood(cov_func, X_train, Y_train):
     def lml_function(unconstrained_hyperparams):
-        pass
-    #
+        # transform to constrained space
+        constrained_hyperparams = param_transform(unconstrained_hyperparams)
+        noise_var = constrained_hyperparams[0]
+        kernel_hyperparams = constrained_hyperparams[1:]
+
+        # compute covariance, perform Cholesky decomposition, solve linear system, compute log det
+        n = len(X_train)
+        K = cov_func(X_train, X_train, kernel_hyperparams) + noise_var * np.eye(n)
+        L, lower = cho_factor(K)
+        alpha = cho_solve((L, lower), Y_train)
+        log_det_K = 2.0 * np.sum(np.log(np.diag(L)))
+
+        y_alpha = np.dot(Y_train, alpha)
+        return -0.5 * y_alpha - 0.5 * log_det_K - 0.5 * n * np.log(2 * np.pi)
 
     return lml_function
 #
@@ -76,9 +106,31 @@ The inner function will then actually compute the posterior, given test inputs X
 It should return a 2-tuple, consisting of the posterior mean and variance.
 '''
 def gp_posterior(cov_func, X_train, Y_train, hyperparams):
+    # Precompute Cholesky decomposition
+    K = cov_func(X_train, X_train, hyperparams[1:]) + hyperparams[0] * np.eye(len(X_train))
+    L, lower = cho_factor(K)
+    alpha = cho_solve((L, lower), Y_train)
+
     def posterior_predictive(X_star):
-        pass
-    #
+        # Compute covariance between X_star and X_train
+        K_star = cov_func(X_star, X_train, hyperparams[1:])
+
+        # Compute mean
+        mean = K_star @ alpha
+
+        # Compute covariance among X_star
+        K_star_star = cov_func(X_star, X_star, hyperparams[1:])
+
+        # Solve for v: L v = K_star.T
+        v = cho_solve((L, lower), K_star.T)
+
+        # Compute variance
+        var = K_star_star - K_star @ v
+
+        # Add noise variance to the diagonal if necessary
+        var = np.diag(var) + hyperparams[0]
+
+        return mean, var
 
     return posterior_predictive
 #
@@ -88,7 +140,12 @@ Compute the negative log of the predictive density, given (1) ground-truth label
 (3) the posterior variance for the test inputs, and (4) the noise variance (to be added to posterior variance)
 '''
 def neg_log_predictive_density(Y_test, posterior_mean, posterior_var, noise_variance):
-    pass
+    # Compute the predictive variance including noise
+    predictive_var = posterior_var + noise_variance
+
+    # Compute negative log predictive density
+    nll = 0.5 * np.sum((Y_test - posterior_mean)**2 / predictive_var + np.log(predictive_var) + np.log(2 * np.pi))
+    return nll
 #
 
 '''
@@ -102,5 +159,14 @@ This function should return a 2-tuple, containing (1) the results of optimizatio
 (2) the log marginal likelihood at the last step of optimization.
 '''
 def empirical_bayes(cov_func, X_train, Y_train, unconstrained_hyperparams_init, step_size, T):
-    pass
+    lml_function = log_marginal_likelihood(cov_func, X_train, Y_train)
+    grad_lml = jax.grad(lml_function)
+
+    hyperparams = unconstrained_hyperparams_init
+    for t in range(T):
+        grad_val = grad_lml(hyperparams)
+        hyperparams = hyperparams + step_size * grad_val
+
+    final_lml = lml_function(hyperparams)
+    return hyperparams, final_lml
 #
