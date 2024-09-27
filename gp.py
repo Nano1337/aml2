@@ -46,13 +46,25 @@ NOTE: exclude adding the noise variance. This should be added to the covariance 
 '''
 def sqexp_cov_function(X1, X2, hyperparams):
     signal_var = hyperparams[1]
-    length_scale = hyperparams[2]
+    length_scale = np.array(hyperparams[2:])  # Shape: (d,)
 
-    # Compute the squared exponential kernel
-    sq_dist = np.sum(X1**2, axis=1, keepdims=True) + np.sum(X2**2, axis=1, keepdims=True).T - 2 * X1 @ X2.T
-    cov = signal_var * np.exp(-0.5 * sq_dist / length_scale**2)
-    
+    # Prevent division by zero
+    length_scale = np.maximum(length_scale, 1e-5)
+
+    # Scale the inputs by length scales
+    X1_scaled = X1 / length_scale
+    X2_scaled = X2 / length_scale
+
+    # Compute the squared Euclidean distance
+    sq_dist = np.sum(X1_scaled**2, axis=1, keepdims=True) + \
+              np.sum(X2_scaled**2, axis=1, keepdims=True).T - \
+              2 * X1_scaled @ X2_scaled.T
+
+    cov = signal_var * np.exp(-1 * sq_dist)  # Included factor of 0.5
+
     return cov
+#
+#
 #
 
 '''
@@ -61,16 +73,19 @@ NOTE: exclude adding the noise variance.
 '''
 def sqexp_mahalanobis_cov_function(X1, X2, hyperparams):
     signal_var = hyperparams[1]
-    length_scale = hyperparams[2]
-    # Element-wise inversion of length_scale
-    inv_length_scale = 1.0 / length_scale # Shape: (d,)
+    length_scale = np.array(hyperparams[2:])  
+
+    inv_length_scale = 1.0 / length_scale  # Shape: (d,)
+    
     # Compute the scaled differences
-    diff = X1[:, np.newaxis, :] - X2[np.newaxis, :, :] # Shape: (n1, n2, d)
-    diff_scaled = diff * inv_length_scale # Broadcasting applies scaling per feature
+    diff = X1[:, np.newaxis, :] - X2[np.newaxis, :, :]  # Shape: (n1, n2, d)
+    diff_scaled = diff * inv_length_scale  # Broadcasting applies scaling per feature
+    
     # Compute the squared Mahalanobis distance
-    mahalanobis_dist = np.sum(diff_scaled ** 2, axis=-1) # Shape: (n1, n2)
+    mahalanobis_dist = np.sum(diff_scaled ** 2, axis=-1)  # Shape: (n1, n2)
+    
     # Compute the covariance matrix
-    cov = signal_var * np.exp(-0.5 * mahalanobis_dist)
+    cov = signal_var * np.exp(-mahalanobis_dist)
     return cov
 #
 
@@ -85,11 +100,10 @@ def log_marginal_likelihood(cov_func, X_train, Y_train):
         # transform to constrained space
         constrained_hyperparams = param_transform(unconstrained_hyperparams)
         noise_var = constrained_hyperparams[0]
-        kernel_hyperparams = constrained_hyperparams[1:]
 
         # compute covariance, perform Cholesky decomposition, solve linear system, compute log det
         n = len(X_train)
-        K = cov_func(X_train, X_train, kernel_hyperparams) + noise_var * np.eye(n)
+        K = cov_func(X_train, X_train, constrained_hyperparams) + noise_var * np.eye(n)
         L, lower = cho_factor(K)
         alpha = cho_solve((L, lower), Y_train)
         log_det_K = 2.0 * np.sum(np.log(np.diag(L)))
@@ -107,19 +121,19 @@ It should return a 2-tuple, consisting of the posterior mean and variance.
 '''
 def gp_posterior(cov_func, X_train, Y_train, hyperparams):
     # Precompute Cholesky decomposition
-    K = cov_func(X_train, X_train, hyperparams[1:]) + hyperparams[0] * np.eye(len(X_train))
+    K = cov_func(X_train, X_train, hyperparams) + hyperparams[0] * np.eye(len(X_train))
     L, lower = cho_factor(K)
     alpha = cho_solve((L, lower), Y_train)
 
     def posterior_predictive(X_star):
         # Compute covariance between X_star and X_train
-        K_star = cov_func(X_star, X_train, hyperparams[1:])
+        K_star = cov_func(X_star, X_train, hyperparams)
 
         # Compute mean
         mean = K_star @ alpha
 
         # Compute covariance among X_star
-        K_star_star = cov_func(X_star, X_star, hyperparams[1:])
+        K_star_star = cov_func(X_star, X_star, hyperparams)
 
         # Solve for v: L v = K_star.T
         v = cho_solve((L, lower), K_star.T)
